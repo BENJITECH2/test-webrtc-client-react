@@ -1,14 +1,14 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { createSignalRConnection } from './signalrClient';
 
-
 const SIGNALR_URL = 'http://135.181.81.49:9000/call';
 
-
 const VideoChat = () => {
+  // Keep existing state and refs...
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-  const localStreamRef = useRef(null); // Add this to keep track of local stream
+  const localStreamRef = useRef(null);
+  const pendingCandidatesRef = useRef([]); // New: store candidates that arrive before peer connection
   const [connection, setConnection] = useState(null);
   const [peer, setPeer] = useState(null);
   const [joined, setJoined] = useState(false);
@@ -19,232 +19,103 @@ const VideoChat = () => {
   const [incomingCall, setIncomingCall] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [mediaError, setMediaError] = useState(null);
+  const [iceConnectionStatus, setIceConnectionStatus] = useState('');
 
+  // SignalR connection setup
   useEffect(() => {
     if (!token) return;
-    const conn = createSignalRConnection(SIGNALR_URL, (type, ...args) => {
-      if (type === 'ReceiveOffer') handleReceiveOffer(args[0], args[1]);
-      if (type === 'ReceiveAnswer') handleReceiveAnswer(args[0]);
-      if (type === 'ReceiveIceCandidate') handleReceiveIceCandidate(args[0], args[1], args[2]);
-    }, token);
-
-    conn.on('ReceiveOffer', handleReceiveOffer);
-    conn.on('ReceiveAnswer', handleReceiveAnswer);
+    
+    const conn = createSignalRConnection(SIGNALR_URL, token);
+    
+    // Set up SignalR event handlers
+    conn.on('ReceiveOffer', (sdp, fromUser) => {
+      console.log(`[SignalR] Received offer from ${fromUser}`);
+      setIncomingCall(fromUser);
+      window.pendingOffer = { sdp, fromUser };
+    });
+    
+    conn.on('ReceiveAnswer', async (sdp) => {
+      console.log("[SignalR] Received answer");
+      setInCall(true);
+      if (peer) {
+        try {
+          await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+          console.log("[RTC] Remote description set successfully");
+        } catch (err) {
+          console.error("[CALL] Error setting remote description:", err);
+        }
+      }
+    });
+    
     conn.on('ReceiveIceCandidate', handleReceiveIceCandidate);
-
+    
     conn.start().then(() => {
       setConnection(conn);
-      conn.invoke('GetConnectionId').then(id => {
-        console.log('My connection ID:', id);
-        setUserId(id);
-      });
       conn.invoke('Join').then(() => {
-        refreshOnlineUsers(conn);
+        console.log("Joined the hub.");
+        // Get our own ID and online users
+        conn.invoke('GetConnectionId').then(id => {
+          console.log('My connection ID:', id);
+          setUserId(id);
+          
+          // Now get online users AFTER we have our ID
+          refreshOnlineUsers(conn, id);
+        });
       });
+    }).catch(err => {
+      console.error("Error connecting to SignalR hub:", err);
+      setMediaError(`Error connecting to server: ${err.message}`);
     });
+    
     return () => {
-      // Clean up media stream when component unmounts
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
       conn.stop();
     };
-    // eslint-disable-next-line
   }, [token]);
   
-  const refreshOnlineUsers = (conn) => {
+  // Function to refresh online users list
+  const refreshOnlineUsers = (conn, currentUserId) => {
+    const idToUse = currentUserId || userId;
     conn.invoke('GetOnlineUsers').then(users => {
-      setOnlineUsers(users.filter(id => id !== userId));
+      // Filter out our own ID
+      setOnlineUsers(users.filter(id => id !== idToUse));
+    }).catch(err => {
+      console.error("Error getting online users:", err);
     });
   };
 
-  // Get user media separately so we can reuse it and handle errors properly
-  const getUserMedia = async () => {
-    try {
-      const constraints = { 
-        video: true, 
-        audio: true 
-      };
-      console.log("[MEDIA] Requesting user media with constraints:", constraints);
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      console.log("[MEDIA] Got local stream:", stream);
-      
-      // Store the stream for later cleanup
-      localStreamRef.current = stream;
-      
-      // Display local video
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        console.log("[MEDIA] Set local video srcObject");
-      }
-      
-      return stream;
-    } catch (err) {
-      console.error("[MEDIA] Error getting user media:", err);
-      setMediaError(`Error accessing camera/microphone: ${err.message}`);
-      return null;
-    }
-  };
-
-  const createPeer = async (isOfferer, remoteUser = null) => {
-    console.log(`[RTC] Creating peer connection as ${isOfferer ? 'offerer' : 'answerer'}`);
-    
-    // Get media first
-    const stream = await getUserMedia();
-    if (!stream) {
-      console.error("[RTC] Failed to get user media, cannot create peer");
-      return null;
-    }
-    
-    // Create peer connection
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:23.88.107.221:3478' },    
-        {
-          urls: [
-            'turn:23.88.107.221:3478?transport=udp',
-            'turn:23.88.107.221:3478?transport=tcp'
-          ],
-          username: 'benji',
-          credential: 'benji',
-        },
-      ],
-      iceCandidatePoolSize: 10,
-    });
-    setPeer(pc);
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && event.candidate.candidate) {
-        console.log('[ICE] Local candidate gathered:', event.candidate);
-        if (connection) {
-          console.log('[ICE] Sending candidate to remote:', event.candidate);
-          connection.invoke('SendIceCandidate', event.candidate.candidate, event.candidate.sdpMid, event.candidate.sdpMLineIndex, remoteUser || calleeId);
-        }
-      } else if (event.candidate === null) {
-        console.log('[ICE] All local candidates have been gathered.');
-      }
-    };
-    pc.oniceconnectionstatechange = () => {
-      console.log('[ICE] ICE connection state:', pc.iceConnectionState);
-    };
-    pc.onicegatheringstatechange = () => {
-      console.log('[ICE] ICE gathering state:', pc.iceGatheringState);
-    };
-    pc.ontrack = (event) => {
-      console.log('[RTC] Remote track received:', event);
-      if (remoteVideoRef.current && event.streams && event.streams[0]) {
-        remoteVideoRef.current.srcObject = event.streams[0];
-        console.log('[RTC] Set remote video srcObject to stream:', event.streams[0]);
-      }
-    };
-    
-    pc.onconnectionstatechange = () => {
-      console.log('[RTC] Connection state change:', pc.connectionState);
-    };
-
-    // Add tracks to the peer connection
-    stream.getTracks().forEach((track) => {
-      console.log(`[RTC] Adding ${track.kind} track to peer connection`);
-      pc.addTrack(track, stream);
-    });
-
-    return pc;
-  };
-
-  const handleReceiveOffer = async (sdp, fromUser) => {
-    console.log(`[SIGNAL] Received offer from ${fromUser}`);
-    setIncomingCall(fromUser);
-    window.pendingOffer = { sdp, fromUser };
-  };
-
-  const acceptCall = async () => {
-    try {
-      console.log("[CALL] Accepting call");
-      setInCall(true);
-      setIncomingCall(null);
-      
-      const { sdp, fromUser } = window.pendingOffer;
-      
-      // Create peer if it doesn't exist yet
-      const peerConnection = await createPeer(false, fromUser);
-      if (!peerConnection) {
-        console.error("[CALL] Failed to create peer connection");
-        setInCall(false);
-        return;
-      }
-      
-      // Set remote description (the offer)
-      console.log("[CALL] Setting remote description (offer)");
-      await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-      
-      // Create and send answer
-      console.log("[CALL] Creating answer");
-      const answer = await peerConnection.createAnswer();
-      console.log("[CALL] Setting local description (answer)");
-      await peerConnection.setLocalDescription(answer);
-      
-      console.log("[CALL] Sending answer");
-      if (connection) {
-        connection.invoke('SendAnswer', answer.sdp, fromUser);
-      }
-      
-      window.pendingOffer = null;
-    } catch (err) {
-      console.error("[CALL] Error accepting call:", err);
-      setInCall(false);
-      setMediaError(`Error accepting call: ${err.message}`);
-    }
-  };
-
-  const handleReceiveAnswer = async (sdp) => {
-    console.log("[SIGNAL] Received answer");
-    try {
-      setInCall(true);
-      if (peer) {
-        console.log("[CALL] Setting remote description (answer)");
-        await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-        console.log("[CALL] Remote description set successfully");
-      } else {
-        console.error("[CALL] Received answer but peer connection doesn't exist");
-      }
-    } catch (err) {
-      console.error("[CALL] Error setting remote description:", err);
-    }
-  };
-
-  const handleReceiveIceCandidate = async (candidate, sdpMid, sdpMLineIndex) => {
-    if (!candidate) {
+  // Handle join button click
+  const handleJoin = async () => {
+    if (!token) {
+      setMediaError("Please enter a valid token");
       return;
     }
-    console.log('[ICE] Received remote candidate:', { candidate, sdpMid, sdpMLineIndex });
-    
-    try {
-      if (peer) {
-        await peer.addIceCandidate({ candidate, sdpMid, sdpMLineIndex });
-        console.log('[ICE] Remote candidate added successfully');
-      } else {
-        console.warn('[ICE] Cannot add ICE candidate, peer connection does not exist');
-      }
-    } catch (e) {
-      console.warn('[ICE] Error adding remote candidate:', e);
+    setJoined(true);
+  };
+  
+  // Handle refresh users button click
+  const handleRefreshUsers = () => {
+    if (connection) {
+      refreshOnlineUsers(connection, userId);
     }
   };
-
-  const handleJoin = async () => {
-    if (token) {
-      setJoined(true);
-    }
-  };
-
+  
+  // Handle call button click
   const handleCall = async () => {
+    if (!calleeId || !connection) {
+      console.error("[CALL] Cannot call without a selected user and connection.");
+      return;
+    }
+    
     try {
       console.log("[CALL] Starting call to", calleeId);
       setInCall(true);
       
       const peerConnection = await createPeer(true, calleeId);
       if (!peerConnection) {
-        console.error("[CALL] Failed to create peer connection");
+        console.error("[CALL] Failed to create peer connection for outgoing call.");
         setInCall(false);
         return;
       }
@@ -259,28 +130,277 @@ const VideoChat = () => {
       await peerConnection.setLocalDescription(offer);
       
       console.log("[CALL] Sending offer to", calleeId);
-      if (connection) {
-        connection.invoke('SendOffer', offer.sdp, calleeId);
-      }
+      await connection.invoke('SendOffer', offer.sdp, calleeId);
+      
     } catch (err) {
-      console.error("[CALL] Error making call:", err);
+      console.error("[CALL] Error starting call:", err);
       setInCall(false);
-      setMediaError(`Error making call: ${err.message}`);
+      setMediaError(`Error starting call: ${err.message}`);
     }
   };
   
-  const handleRefreshUsers = () => {
-    if (connection) {
-      refreshOnlineUsers(connection);
+  // IMPROVED getUserMedia with more specific constraints
+  const getUserMedia = async () => {
+    try {
+      const constraints = { 
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 30 }
+        }, 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      };
+      console.log("[MEDIA] Requesting user media with constraints:", constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("[MEDIA] Got local stream:", stream);
+      
+      localStreamRef.current = stream;
+      
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        console.log("[MEDIA] Set local video srcObject");
+      }
+      
+      return stream;
+    } catch (err) {
+      console.error("[MEDIA] Error getting user media:", err);
+      setMediaError(`Error accessing camera/microphone: ${err.message}`);
+      return null;
     }
   };
 
+  // IMPROVED createPeer with better ICE server config
+  const createPeer = async (isOfferer, remoteUser = null) => {
+    console.log(`[RTC] Creating peer connection as ${isOfferer ? 'offerer' : 'answerer'}`);
+    
+    const stream = await getUserMedia();
+    if (!stream) {
+      console.error("[RTC] Failed to get user media, cannot create peer");
+      return null;
+    }
+    
+    // UPDATED ICE server configuration with multiple STUN/TURN options
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        { urls: 'stun:23.88.107.221:3478' },
+        {
+          urls: [
+            'turn:23.88.107.221:3478?transport=udp',
+            'turn:23.88.107.221:3478?transport=tcp'
+          ],
+          username: 'benji',
+          credential: 'benji',
+        },
+        // Public TURN server for testing
+        {
+          urls: [
+            'turn:openrelay.metered.ca:80?transport=tcp',
+            'turn:openrelay.metered.ca:443?transport=tcp',
+            'turn:openrelay.metered.ca:443?transport=udp'
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        }
+      ],
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: 'all' // Try 'relay' if this still fails
+    });
+    setPeer(pc);
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && event.candidate.candidate) {
+        console.log('[ICE] Local candidate gathered:', event.candidate);
+        if (connection) {
+          console.log('[ICE] Sending candidate to remote:', event.candidate);
+          connection.invoke('SendIceCandidate', event.candidate.candidate, event.candidate.sdpMid, event.candidate.sdpMLineIndex, remoteUser || calleeId);
+        }
+      } else if (event.candidate === null) {
+        console.log('[ICE] All local candidates have been gathered.');
+      }
+    };
+    
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      console.log('[ICE] ICE connection state:', state);
+      setIceConnectionStatus(state);
+      
+      // Handle failed connection with retry for specific states
+      if (state === 'disconnected' || state === 'failed') {
+        console.log('[ICE] Connection issues detected. Consider restarting the call.');
+      }
+      
+      if (state === 'connected' || state === 'completed') {
+        console.log('[ICE] Connection established successfully!');
+      }
+    };
+    
+    pc.onicegatheringstatechange = () => {
+      console.log('[ICE] ICE gathering state:', pc.iceGatheringState);
+    };
+    
+    pc.ontrack = (event) => {
+      console.log('[RTC] Remote track received:', event.track.kind);
+      if (remoteVideoRef.current && event.streams && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+        console.log('[RTC] Set remote video srcObject to stream');
+        
+        // Monitor remote track status
+        event.track.onunmute = () => {
+          console.log('[RTC] Remote track unmuted:', event.track.kind);
+        };
+        
+        event.track.onmute = () => {
+          console.log('[RTC] Remote track muted:', event.track.kind);
+        };
+        
+        event.track.onended = () => {
+          console.log('[RTC] Remote track ended:', event.track.kind);
+        };
+      }
+    };
+    
+    pc.onconnectionstatechange = () => {
+      console.log('[RTC] Connection state change:', pc.connectionState);
+      
+      if (pc.connectionState === 'connected') {
+        console.log('[RTC] Peers connected successfully!');
+      }
+    };
+
+    // Add tracks to the peer connection
+    stream.getTracks().forEach((track) => {
+      console.log(`[RTC] Adding ${track.kind} track to peer connection`);
+      pc.addTrack(track, stream);
+    });
+    
+    // Add any pending ICE candidates if available
+    if (pendingCandidatesRef.current.length > 0) {
+      console.log('[ICE] Adding pending candidates:', pendingCandidatesRef.current.length);
+      for (const candidate of pendingCandidatesRef.current) {
+        try {
+          await pc.addIceCandidate(candidate);
+          console.log('[ICE] Added pending candidate');
+        } catch (e) {
+          console.warn('[ICE] Error adding pending candidate:', e);
+        }
+      }
+      pendingCandidatesRef.current = [];
+    }
+
+    return pc;
+  };
+
+  // Keep most other functions intact, update these:
+  
+  // IMPROVED accept call function
+  const acceptCall = async () => {
+    try {
+      console.log("[CALL] Accepting call");
+      setInCall(true);
+      setIncomingCall(null);
+      
+      const { sdp, fromUser } = window.pendingOffer;
+      
+      const peerConnection = await createPeer(false, fromUser);
+      if (!peerConnection) {
+        console.error("[CALL] Failed to create peer connection");
+        setInCall(false);
+        return;
+      }
+      
+      console.log("[CALL] Setting remote description (offer)");
+      await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      
+      console.log("[CALL] Creating answer");
+      const answer = await peerConnection.createAnswer({
+        offerToReceiveAudio: true, 
+        offerToReceiveVideo: true
+      });
+      
+      console.log("[CALL] Setting local description (answer)");
+      await peerConnection.setLocalDescription(answer);
+      
+      console.log("[CALL] Sending answer to", fromUser);
+      if (connection) {
+        await connection.invoke('SendAnswer', answer.sdp, fromUser);
+      }
+      
+      window.pendingOffer = null;
+    } catch (err) {
+      console.error("[CALL] Error accepting call:", err);
+      setInCall(false);
+      setMediaError(`Error accepting call: ${err.message}`);
+    }
+  };
+
+  // IMPROVED ICE candidate handling
+  const handleReceiveIceCandidate = async (candidate, sdpMid, sdpMLineIndex) => {
+    if (!candidate) return;
+    
+    console.log('[ICE] Received remote candidate');
+    
+    const iceCandidate = { candidate, sdpMid, sdpMLineIndex };
+    
+    try {
+      if (peer && peer.remoteDescription) {
+        await peer.addIceCandidate(iceCandidate);
+        console.log('[ICE] Remote candidate added successfully');
+      } else {
+        // Store candidates that arrive before the peer connection is ready
+        console.log('[ICE] Storing early candidate for later');
+        pendingCandidatesRef.current.push(iceCandidate);
+      }
+    } catch (e) {
+      console.warn('[ICE] Error adding remote candidate:', e);
+    }
+  };
+
+  // Add a function to restart ICE if needed
+  const restartIce = async () => {
+    if (!peer || !inCall) return;
+    
+    try {
+      console.log("[ICE] Restarting ICE connection");
+      
+      // Create a new offer with ICE restart flag
+      const offer = await peer.createOffer({ 
+        iceRestart: true,
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      });
+      
+      await peer.setLocalDescription(offer);
+      
+      if (connection) {
+        await connection.invoke('SendOffer', offer.sdp, calleeId);
+      }
+    } catch (err) {
+      console.error("[ICE] Error restarting ICE:", err);
+    }
+  };
+
+  // UPDATE the UI to include connection status and a restart button
   return (
     <div>
       <h2>Video Chat</h2>
       {mediaError && (
         <div style={{ color: 'red', marginBottom: 12 }}>
           {mediaError}
+        </div>
+      )}
+      {iceConnectionStatus === 'failed' && (
+        <div style={{ color: 'red', marginBottom: 12 }}>
+          Connection failed. Try restarting the call.
+          <button onClick={restartIce} style={{ marginLeft: 8 }}>Restart Connection</button>
         </div>
       )}
       <div style={{ marginBottom: 12 }}>
@@ -293,7 +413,10 @@ const VideoChat = () => {
         />
         <button onClick={handleJoin} disabled={joined || !token}>Join</button>
         {userId && <div style={{ fontSize: 12, color: 'gray', marginTop: 4 }}>Your ID: {userId}</div>}
+        {inCall && <div style={{ fontSize: 12, color: 'gray', marginTop: 4 }}>Connection Status: {iceConnectionStatus}</div>}
       </div>
+      
+      {/* Keep the rest of the UI the same */}
       {joined && (
         <div style={{ marginBottom: 12 }}>
           <select
