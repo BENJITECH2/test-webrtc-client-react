@@ -12,7 +12,7 @@ const VideoChat = () => {
   const [connection, setConnection] = useState(null);
   const [peer, setPeer] = useState(null);
   const [joined, setJoined] = useState(false);
-  const [token, setToken] = useState("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0ZjMyMjBhOC1kNTllLTQxYzgtYTk1MC1iOGI5YWEyYjcyNTAiLCJlbWFpbCI6ImhvbGFAZ21haWwuY29tIiwianRpIjoiZjNiMTIxODMtYWRjMC00NjEyLWI0ZTUtMWNkYjkzNmFmM2FhIiwiaHR0cDovL3NjaGVtYXMueG1sc29hcC5vcmcvd3MvMjAwNS8wNS9pZGVudGl0eS9jbGFpbXMvbmFtZWlkZW50aWZpZXIiOiI0ZjMyMjBhOC1kNTllLTQxYzgtYTk1MC1iOGI5YWEyYjcyNTAiLCJodHRwOi8vc2NoZW1hcy5taWNyb3NvZnQuY29tL3dzLzIwMDgvMDYvaWRlbnRpdHkvY2xhaW1zL3JvbGUiOiJDbGllbnQiLCJleHAiOjE3NTg5Mjg3MDR9.Rij426Gu8hVNkSQsy2hVOBIdLMkDmM1xrStxdvBLomg");
+  const [token, setToken] = useState("");
   const [userId, setUserId] = useState('');
   const [calleeId, setCalleeId] = useState('');
   const [onlineUsers, setOnlineUsers] = useState([]);
@@ -21,59 +21,7 @@ const VideoChat = () => {
   const [mediaError, setMediaError] = useState(null);
   const [iceConnectionStatus, setIceConnectionStatus] = useState('');
 
-  // SignalR connection setup
-  useEffect(() => {
-    if (!token) return;
-    
-    const conn = createSignalRConnection(SIGNALR_URL, token);
-    
-    // Set up SignalR event handlers
-    conn.on('ReceiveOffer', (sdp, fromUser) => {
-      console.log(`[SignalR] Received offer from ${fromUser}`);
-      setIncomingCall(fromUser);
-      window.pendingOffer = { sdp, fromUser };
-    });
-    
-    conn.on('ReceiveAnswer', async (sdp) => {
-      console.log("[SignalR] Received answer");
-      setInCall(true);
-      if (peer) {
-        try {
-          await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-          console.log("[RTC] Remote description set successfully");
-        } catch (err) {
-          console.error("[CALL] Error setting remote description:", err);
-        }
-      }
-    });
-    
-    conn.on('ReceiveIceCandidate', handleReceiveIceCandidate);
-    
-    conn.start().then(() => {
-      setConnection(conn);
-      conn.invoke('Join').then(() => {
-        console.log("Joined the hub.");
-        // Get our own ID and online users
-        conn.invoke('GetConnectionId').then(id => {
-          console.log('My connection ID:', id);
-          setUserId(id);
-          
-          // Now get online users AFTER we have our ID
-          refreshOnlineUsers(conn, id);
-        });
-      });
-    }).catch(err => {
-      console.error("Error connecting to SignalR hub:", err);
-      setMediaError(`Error connecting to server: ${err.message}`);
-    });
-    
-    return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
-      }
-      conn.stop();
-    };
-  }, [token]);
+
   
   // Function to refresh online users list
   const refreshOnlineUsers = (conn, currentUserId) => {
@@ -86,6 +34,8 @@ const VideoChat = () => {
     });
   };
 
+
+
   // Handle join button click
   const handleJoin = async () => {
     if (!token) {
@@ -93,6 +43,48 @@ const VideoChat = () => {
       return;
     }
     setJoined(true);
+
+    const conn = createSignalRConnection(SIGNALR_URL, token);
+
+    // Set up SignalR event handlers
+    conn.on('ReceiveOffer', (sdp, fromUser) => {
+      console.log(`[SignalR] Received offer from ${fromUser}`);
+      setIncomingCall(fromUser);
+      window.pendingOffer = { sdp, fromUser };
+    });
+
+    conn.on('ReceiveAnswer', async (sdp) => {
+      console.log("[SignalR] Received answer");
+      setInCall(true);
+      if (peer) {
+        try {
+          await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+          console.log("[RTC] Remote description set successfully");
+        } catch (err) {
+          console.error("[CALL] Error setting remote description:", err);
+        }
+      }
+    });
+
+    conn.on('ReceiveIceCandidate', handleReceiveIceCandidate);
+
+    conn.start().then(() => {
+      setConnection(conn);
+      conn.invoke('Join').then(() => {
+        console.log("Joined the hub.");
+        // Get our own ID and online users
+        conn.invoke('GetConnectionId').then(id => {
+          console.log('My connection ID:', id);
+          setUserId(id);
+
+          // Now get online users AFTER we have our ID
+          refreshOnlineUsers(conn, id);
+        });
+      });
+    }).catch(err => {
+      console.error("Error connecting to SignalR hub:", err);
+      setMediaError(`Error connecting to server: ${err.message}`);
+    });
   };
   
   // Handle refresh users button click
