@@ -179,11 +179,6 @@ const VideoChat = () => {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' },
-        { urls: 'stun:23.88.107.221:3478' },
         {
           urls: [
             'turn:23.88.107.221:3478?transport=udp',
@@ -191,20 +186,9 @@ const VideoChat = () => {
           ],
           username: 'benji',
           credential: 'benji',
-        },
-        // Public TURN server for testing
-        {
-          urls: [
-            'turn:openrelay.metered.ca:80?transport=tcp',
-            'turn:openrelay.metered.ca:443?transport=tcp',
-            'turn:openrelay.metered.ca:443?transport=udp'
-          ],
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
         }
       ],
-      iceCandidatePoolSize: 10,
-      iceTransportPolicy: 'all' // Try 'relay' if this still fails
+      iceTransportPolicy: 'relay', // <--- Force TURN only for testing
     });
     setPeer(pc);
 
