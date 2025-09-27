@@ -8,6 +8,7 @@ const SIGNALR_URL = 'http://135.181.81.49:9000/call';
 const VideoChat = () => {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const localStreamRef = useRef(null); // Add this to keep track of local stream
   const [connection, setConnection] = useState(null);
   const [peer, setPeer] = useState(null);
   const [joined, setJoined] = useState(false);
@@ -17,6 +18,7 @@ const VideoChat = () => {
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [incomingCall, setIncomingCall] = useState(null);
   const [inCall, setInCall] = useState(false);
+  const [mediaError, setMediaError] = useState(null);
 
   useEffect(() => {
     if (!token) return;
@@ -24,8 +26,7 @@ const VideoChat = () => {
       if (type === 'ReceiveOffer') handleReceiveOffer(args[0], args[1]);
       if (type === 'ReceiveAnswer') handleReceiveAnswer(args[0]);
       if (type === 'ReceiveIceCandidate') handleReceiveIceCandidate(args[0], args[1], args[2]);
-      // No IncomingCall event needed; UI is triggered by ReceiveOffer
-    }, token); // Pass token for authentication
+    }, token);
 
     conn.on('ReceiveOffer', handleReceiveOffer);
     conn.on('ReceiveAnswer', handleReceiveAnswer);
@@ -33,33 +34,69 @@ const VideoChat = () => {
 
     conn.start().then(() => {
       setConnection(conn);
-      // Get connection ID and store it
       conn.invoke('GetConnectionId').then(id => {
         console.log('My connection ID:', id);
         setUserId(id);
       });
-      // Join the hub
       conn.invoke('Join').then(() => {
-        // Get list of online users
         refreshOnlineUsers(conn);
       });
     });
     return () => {
+      // Clean up media stream when component unmounts
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
       conn.stop();
     };
     // eslint-disable-next-line
   }, [token]);
   
-  // Function to refresh the list of online users
   const refreshOnlineUsers = (conn) => {
     conn.invoke('GetOnlineUsers').then(users => {
       setOnlineUsers(users.filter(id => id !== userId));
     });
   };
 
-  // WebRTC setup
+  // Get user media separately so we can reuse it and handle errors properly
+  const getUserMedia = async () => {
+    try {
+      const constraints = { 
+        video: true, 
+        audio: true 
+      };
+      console.log("[MEDIA] Requesting user media with constraints:", constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("[MEDIA] Got local stream:", stream);
+      
+      // Store the stream for later cleanup
+      localStreamRef.current = stream;
+      
+      // Display local video
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        console.log("[MEDIA] Set local video srcObject");
+      }
+      
+      return stream;
+    } catch (err) {
+      console.error("[MEDIA] Error getting user media:", err);
+      setMediaError(`Error accessing camera/microphone: ${err.message}`);
+      return null;
+    }
+  };
+
   const createPeer = async (isOfferer, remoteUser = null) => {
-    // Replace the TURN config below with your actual TURN server details
+    console.log(`[RTC] Creating peer connection as ${isOfferer ? 'offerer' : 'answerer'}`);
+    
+    // Get media first
+    const stream = await getUserMedia();
+    if (!stream) {
+      console.error("[RTC] Failed to get user media, cannot create peer");
+      return null;
+    }
+    
+    // Create peer connection
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -73,6 +110,7 @@ const VideoChat = () => {
           credential: 'benji',
         },
       ],
+      iceCandidatePoolSize: 10,
     });
     setPeer(pc);
 
@@ -94,91 +132,141 @@ const VideoChat = () => {
       console.log('[ICE] ICE gathering state:', pc.iceGatheringState);
     };
     pc.ontrack = (event) => {
-      console.log('[ICE] Remote track received:', event);
-      if (remoteVideoRef.current) {
-        // If multiple tracks/streams, always set the first stream
-        if (event.streams && event.streams.length > 0) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-          console.log('[ICE] Set remote video srcObject to stream:', event.streams[0]);
-        } else if (event.track) {
-          // Fallback: create a new MediaStream if only a track is present
-          const ms = new window.MediaStream([event.track]);
-          remoteVideoRef.current.srcObject = ms;
-          console.log('[ICE] Set remote video srcObject to single track stream:', ms);
-        }
+      console.log('[RTC] Remote track received:', event);
+      if (remoteVideoRef.current && event.streams && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+        console.log('[RTC] Set remote video srcObject to stream:', event.streams[0]);
       }
     };
+    
+    pc.onconnectionstatechange = () => {
+      console.log('[RTC] Connection state change:', pc.connectionState);
+    };
 
-    // Get local media
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-    }
+    // Add tracks to the peer connection
+    stream.getTracks().forEach((track) => {
+      console.log(`[RTC] Adding ${track.kind} track to peer connection`);
+      pc.addTrack(track, stream);
+    });
 
-    if (isOfferer) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (connection) {
-        connection.invoke('SendOffer', offer.sdp, calleeId);
-      }
-    }
+    return pc;
   };
 
-  // SignalR handlers
   const handleReceiveOffer = async (sdp, fromUser) => {
+    console.log(`[SIGNAL] Received offer from ${fromUser}`);
     setIncomingCall(fromUser);
-    // Wait for user to accept call
     window.pendingOffer = { sdp, fromUser };
   };
 
   const acceptCall = async () => {
-    setInCall(true);
-    setIncomingCall(null);
-    const { sdp, fromUser } = window.pendingOffer;
-    if (!peer) await createPeer(false, fromUser);
-    await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    if (connection) {
-      connection.invoke('SendAnswer', answer.sdp, fromUser);
+    try {
+      console.log("[CALL] Accepting call");
+      setInCall(true);
+      setIncomingCall(null);
+      
+      const { sdp, fromUser } = window.pendingOffer;
+      
+      // Create peer if it doesn't exist yet
+      const peerConnection = await createPeer(false, fromUser);
+      if (!peerConnection) {
+        console.error("[CALL] Failed to create peer connection");
+        setInCall(false);
+        return;
+      }
+      
+      // Set remote description (the offer)
+      console.log("[CALL] Setting remote description (offer)");
+      await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      
+      // Create and send answer
+      console.log("[CALL] Creating answer");
+      const answer = await peerConnection.createAnswer();
+      console.log("[CALL] Setting local description (answer)");
+      await peerConnection.setLocalDescription(answer);
+      
+      console.log("[CALL] Sending answer");
+      if (connection) {
+        connection.invoke('SendAnswer', answer.sdp, fromUser);
+      }
+      
+      window.pendingOffer = null;
+    } catch (err) {
+      console.error("[CALL] Error accepting call:", err);
+      setInCall(false);
+      setMediaError(`Error accepting call: ${err.message}`);
     }
-    window.pendingOffer = null;
   };
 
   const handleReceiveAnswer = async (sdp) => {
-    setInCall(true);
-    if (peer) {
-      await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+    console.log("[SIGNAL] Received answer");
+    try {
+      setInCall(true);
+      if (peer) {
+        console.log("[CALL] Setting remote description (answer)");
+        await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+        console.log("[CALL] Remote description set successfully");
+      } else {
+        console.error("[CALL] Received answer but peer connection doesn't exist");
+      }
+    } catch (err) {
+      console.error("[CALL] Error setting remote description:", err);
     }
   };
 
   const handleReceiveIceCandidate = async (candidate, sdpMid, sdpMLineIndex) => {
     if (!candidate) {
-      // Ignore empty candidate (end-of-candidates signal)
       return;
     }
     console.log('[ICE] Received remote candidate:', { candidate, sdpMid, sdpMLineIndex });
-    if (peer) {
-      try {
+    
+    try {
+      if (peer) {
         await peer.addIceCandidate({ candidate, sdpMid, sdpMLineIndex });
         console.log('[ICE] Remote candidate added successfully');
-      } catch (e) {
-        console.warn('[ICE] Error adding remote candidate:', e);
+      } else {
+        console.warn('[ICE] Cannot add ICE candidate, peer connection does not exist');
       }
+    } catch (e) {
+      console.warn('[ICE] Error adding remote candidate:', e);
     }
   };
 
   const handleJoin = async () => {
-    // In a real app, you'd get the token from your auth service
     if (token) {
       setJoined(true);
     }
   };
 
   const handleCall = async () => {
-    setInCall(true);
-    await createPeer(true);
+    try {
+      console.log("[CALL] Starting call to", calleeId);
+      setInCall(true);
+      
+      const peerConnection = await createPeer(true, calleeId);
+      if (!peerConnection) {
+        console.error("[CALL] Failed to create peer connection");
+        setInCall(false);
+        return;
+      }
+      
+      console.log("[CALL] Creating offer");
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      });
+      
+      console.log("[CALL] Setting local description (offer)");
+      await peerConnection.setLocalDescription(offer);
+      
+      console.log("[CALL] Sending offer to", calleeId);
+      if (connection) {
+        connection.invoke('SendOffer', offer.sdp, calleeId);
+      }
+    } catch (err) {
+      console.error("[CALL] Error making call:", err);
+      setInCall(false);
+      setMediaError(`Error making call: ${err.message}`);
+    }
   };
   
   const handleRefreshUsers = () => {
@@ -190,6 +278,11 @@ const VideoChat = () => {
   return (
     <div>
       <h2>Video Chat</h2>
+      {mediaError && (
+        <div style={{ color: 'red', marginBottom: 12 }}>
+          {mediaError}
+        </div>
+      )}
       <div style={{ marginBottom: 12 }}>
         <input
           placeholder="Enter JWT token"
@@ -225,8 +318,14 @@ const VideoChat = () => {
         </div>
       )}
       <div style={{ display: 'flex', gap: '10px' }}>
-        <video ref={localVideoRef} autoPlay playsInline muted style={{ width: '45%' }} />
-        <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '45%' }} />
+        <div style={{ width: '45%' }}>
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ width: '100%', border: '1px solid #ccc' }} />
+          <div style={{ textAlign: 'center', marginTop: 4 }}>Local Video</div>
+        </div>
+        <div style={{ width: '45%' }}>
+          <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', border: '1px solid #ccc' }} />
+          <div style={{ textAlign: 'center', marginTop: 4 }}>Remote Video</div>
+        </div>
       </div>
     </div>
   );
