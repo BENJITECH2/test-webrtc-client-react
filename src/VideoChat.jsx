@@ -59,9 +59,21 @@ const VideoChat = () => {
       if (peer) {
         try {
           await peer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-          console.log("[RTC] Remote description set successfully");
+          console.log("[RTC] Remote description (answer) set successfully");
+          // --- FIX: Flush pending ICE candidates after setting remote description ---
+          console.log("[ICE] Processing pending candidates after receiving answer.");
+          for (const candidate of pendingCandidatesRef.current) {
+            try {
+              await peer.addIceCandidate(candidate);
+              console.log('[ICE] Added pending candidate successfully');
+            } catch (e) {
+              console.warn('[ICE] Error adding pending candidate:', e);
+            }
+          }
+          pendingCandidatesRef.current = [];
+          // --- END FIX ---
         } catch (err) {
-          console.error("[CALL] Error setting remote description:", err);
+          console.error("[CALL] Error setting remote description for answer:", err);
         }
       }
     });
@@ -189,7 +201,7 @@ const VideoChat = () => {
         }
       ],
       iceTransportPolicy: 'relay', // <--- Force TURN only for testing
-    });
+});
     setPeer(pc);
 
     pc.onicecandidate = (event) => {
@@ -295,7 +307,18 @@ const VideoChat = () => {
       
       console.log("[CALL] Setting remote description (offer)");
       await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-      
+      // --- FIX: Flush pending ICE candidates after setting remote description ---
+      console.log("[ICE] Processing pending candidates after setting remote description.");
+      for (const candidate of pendingCandidatesRef.current) {
+        try {
+          await peerConnection.addIceCandidate(candidate);
+          console.log('[ICE] Added pending candidate successfully');
+        } catch (e) {
+          console.warn('[ICE] Error adding pending candidate:', e);
+        }
+      }
+      pendingCandidatesRef.current = [];
+      // --- END FIX ---
       console.log("[CALL] Creating answer");
       const answer = await peerConnection.createAnswer({
         offerToReceiveAudio: true, 
