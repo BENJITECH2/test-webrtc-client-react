@@ -4,14 +4,14 @@ import { createSignalRConnection } from './signalrClient';
 
 const SIGNALR_URL = 'http://135.181.81.49:9000/call';
 
-const mytoken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMWVkMjMzYi0wNjk4LTQ4YjMtYTdmMS1kMGU5Zjc5OWQ2MDIiLCJlbWFpbCI6ImhvbGFAZ21haWwuY29tIiwianRpIjoiMTg5N2UzNDYtNTQxMi00MWYzLTk3NzktMjlkMjZiNDBkMTg5IiwiaHR0cDovL3NjaGVtYXMueG1sc29hcC5vcmcvd3MvMjAwNS8wNS9pZGVudGl0eS9jbGFpbXMvbmFtZWlkZW50aWZpZXIiOiIyMWVkMjMzYi0wNjk4LTQ4YjMtYTdmMS1kMGU5Zjc5OWQ2MDIiLCJodHRwOi8vc2NoZW1hcy5taWNyb3NvZnQuY29tL3dzLzIwMDgvMDYvaWRlbnRpdHkvY2xhaW1zL3JvbGUiOiJDbGllbnQiLCJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiaG9sYUBnbWFpbC5jb20iLCJleHAiOjE3NTg5NTkyMzd9.Q1T4G7XoHjERhx5oxcD2tyJWl78mMHRGNtZ94ofCFyg"
+
 const VideoChat = () => {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const [connection, setConnection] = useState(null);
   const [peer, setPeer] = useState(null);
   const [joined, setJoined] = useState(false);
-  const [token, setToken] = useState(mytoken);
+  const [token, setToken] = useState("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0ZjMyMjBhOC1kNTllLTQxYzgtYTk1MC1iOGI5YWEyYjcyNTAiLCJlbWFpbCI6ImhvbGFAZ21haWwuY29tIiwianRpIjoiZjNiMTIxODMtYWRjMC00NjEyLWI0ZTUtMWNkYjkzNmFmM2FhIiwiaHR0cDovL3NjaGVtYXMueG1sc29hcC5vcmcvd3MvMjAwNS8wNS9pZGVudGl0eS9jbGFpbXMvbmFtZWlkZW50aWZpZXIiOiI0ZjMyMjBhOC1kNTllLTQxYzgtYTk1MC1iOGI5YWEyYjcyNTAiLCJodHRwOi8vc2NoZW1hcy5taWNyb3NvZnQuY29tL3dzLzIwMDgvMDYvaWRlbnRpdHkvY2xhaW1zL3JvbGUiOiJDbGllbnQiLCJleHAiOjE3NTg5Mjg3MDR9.Rij426Gu8hVNkSQsy2hVOBIdLMkDmM1xrStxdvBLomg");
   const [userId, setUserId] = useState('');
   const [calleeId, setCalleeId] = useState('');
   const [onlineUsers, setOnlineUsers] = useState([]);
